@@ -1,0 +1,4 @@
+conf/certbot
+data/*
+*.log
+.env

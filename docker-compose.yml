@@ -1,0 +1,190 @@
+version: '3.7'
+services:
+
+  nginx:
+    image: nginx:alpine
+    container_name: nginx
+    restart: unless-stopped
+    volumes:
+      - ./conf/nginx:/etc/nginx/conf.d
+      - ./conf/certbot:/etc/letsencrypt
+      - ./conf/nginx/www:/var/www/certbot
+    ports:
+      - 80:80
+      - 443:443
+    networks:
+      - backend
+    command: "/bin/sh -c 'while :; do sleep 6h & wait $${!}; nginx -s reload; done & nginx -g \"daemon off;\"'"
+    depends_on:
+      - certbot
+
+  certbot:
+    image: certbot/certbot
+    container_name: certbot
+    restart: unless-stopped
+    volumes:
+      - ./conf/certbot:/etc/letsencrypt
+      - ./conf/nginx/www:/var/www/certbot
+    networks:
+      - backend
+    entrypoint: "/bin/sh -c 'trap exit TERM; while :; do certbot renew; chmod 644 /etc/letsencrypt/archive/iotm.tk/*.pem; sleep 12h & wait $${!}; done;'"
+    depends_on:
+      - rabbit
+
+  rabbit:
+    image: rabbitmq:3-management-alpine
+    container_name: rabbit
+    hostname: rabbit
+    restart: always
+    env_file:
+      - .env
+    ports:
+      - 1883:1883
+      - 8883:8883
+      - 18883:18883
+      - 127.0.0.1:5671:5671
+      - 127.0.0.1:5672:5672
+      - 127.0.0.1:15672:15672
+      - 127.0.0.1:15692:15692
+    cap_add:
+      - ALL
+    networks:
+      - backend
+    volumes:
+      - ./conf/rabbit:/etc/rabbitmq
+      - ./conf/certbot/archive/iotm.tk:/etc/rabbitmq/certs
+      - ./data/rabbit:/var/lib/rabbitmq
+      - ./logs/rabbit:/var/log/rabbitmq
+    depends_on:
+      - portainer
+
+  portainer:
+    image: portainer/portainer:latest
+    container_name: portainer
+    restart: always
+    command: -H unix:///var/run/docker.sock
+    environment:
+      - VIRTUAL_HOST=broker
+    ports:
+      - 127.0.0.1:8000:8000
+      - 127.0.0.1:9000:9000
+    networks:
+      - backend
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./data/portainer:/data
+    depends_on:
+      - grafana
+
+  grafana:
+    image:  grafana/grafana:latest
+    container_name: grafana
+    ports:
+      - 127.0.0.1:3000:3000
+    restart: always
+    user: "472"
+    networks:
+      - backend
+    volumes:
+      - ./conf/grafana/dashboards.yml:/etc/grafana/provisioning/dashboards/rabbitmq.yaml
+      - ./conf/grafana/datasources.yml:/etc/grafana/provisioning/datasources/prometheus.yaml
+      - ./conf/grafana/dashboards:/dashboards
+      - ./data/grafana:/var/lib/grafana
+    environment:
+      # https://grafana.com/plugins/flant-statusmap-panel
+      # https://grafana.com/plugins/grafana-piechart-panel
+      # https://grafana.com/plugins/grafana-polystat-panel
+      # https://grafana.com/plugins/jdbranham-diagram-panel
+      # https://grafana.com/plugins/michaeldmoore-multistat-panel
+      # https://grafana.com/plugins/vonage-status-panel
+      # https://grafana.com/plugins/yesoreyeram-boomtable-panel
+      - GF_INSTALL_PLUGINS=flant-statusmap-panel,grafana-piechart-panel,grafana-polystat-panel,jdbranham-diagram-panel,michaeldmoore-multistat-panel,vonage-status-panel,yesoreyeram-boomtable-panel,camptocamp-prometheus-alertmanager-datasource,natel-influx-admin-panel
+      - GF_SECURITY_COOKIE_SECURE="true"
+      - GF_SERVER_DOMAIN=iotm.tk
+      - GF_SERVER_ROOT_URL=https://iotm.tk/manager/grafana/
+      - GF_DEFAULT_INSTANCE_NAME=iotm
+      - GF_AUTH_PROXY_ENABLED=false
+      - GF_USERS_ALLOW_SIGN_UP=false
+    depends_on:
+      - prometheus
+
+  prometheus:
+    image: prom/prometheus:v2.16.0
+    container_name: prometheus
+    networks:
+      - backend
+    ports:
+      - 127.0.0.1:9090:9090
+    restart: always
+    volumes:
+      - ./data/prometheus:/prometheus
+      - ./conf/prometheus:/etc/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.console.libraries=/usr/share/prometheus/console_libraries
+      - --web.console.templates=/usr/share/prometheus/consoles
+      - --web.route-prefix=/manager/prometheus
+      - --web.external-url=https://iotm.tk/manager/prometheus
+    depends_on:
+      - node-exporter
+
+  node-exporter:
+    image: prom/node-exporter:v0.18.1
+    container_name: node-exporter
+    restart: always
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.rootfs=/rootfs'
+      - '--path.sysfs=/host/sys'
+      - '--collector.filesystem.ignored-mount-points=^/(sys|proc|dev|host|etc|rootfs/var/lib/docker/containers|rootfs/var/lib/docker/overlay2|rootfs/run/docker/netns|rootfs/var/lib/docker/aufs)($$|/)'
+    ports:
+      - 9100:9100
+    networks:
+      - backend
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    depends_on:
+      - influx
+
+  influx:
+    image: influxdb:1.8-alpine
+    container_name: influx
+    restart: always
+    env_file:
+      - .env
+    networks:
+      - backend
+    ports:
+      - 8086:8086
+    volumes:
+      - ./data/influx:/var/lib/influxdb
+    depends_on:
+      - telegraf
+
+  telegraf:
+    image: telegraf:alpine
+    container_name: telegraf
+    restart: always
+    environment:
+      HOST_PROC: /rootfs/proc
+      HOST_SYS: /rootfs/sys
+      HOST_ETC: /rootfs/etc
+    networks:
+      - backend
+    volumes:
+      - ./conf/telegraf/telegraf.conf:/etc/telegraf/telegraf.conf:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /sys:/rootfs/sys:ro
+      - /proc:/rootfs/proc:ro
+      - /etc:/rootfs/etc:ro
+      
+networks:
+  backend:
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.16.16.0/24
